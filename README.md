@@ -23,6 +23,19 @@ npm run preview    # 预览构建产物
 npm test           # 运行测试（Node 内置测试运行器，零依赖）
 ```
 
+### 命令行取数
+
+同一套引擎也可以直接跑，输出一份完整的命理档案 JSON：
+
+```bash
+node scripts/analyze.mjs --date 1990-05-15 --hour 3 --gender 男
+node scripts/analyze.mjs --date 1990-05-15 --hour 3 --gender 男 \
+     --events events.json --relationships relationships.json
+```
+
+`--hour` 为时辰索引（0=子时 23-1点 … 11=亥时 21-23点），`--today` 可覆盖"今天"。
+命理大师智能体（`destiny-master`）即以该脚本为唯一取数来源。
+
 部署到 GitHub Pages 等子路径时，`vite.config.js` 中的 `base: '/lifemap/'` 已配好。
 
 ---
