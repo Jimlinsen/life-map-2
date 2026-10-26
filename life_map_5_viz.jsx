@@ -40,6 +40,7 @@ import { analyzeInfluencePosture } from './src/core/posture.js';
 import { analyzePatternTransparency } from './src/core/transparency.js';
 import { InfluencePosturePanel } from './src/components/panels/InfluencePosturePanel.jsx';
 import { PatternTransparencyPanel } from './src/components/panels/PatternTransparencyPanel.jsx';
+import { AwakeningQuizPanel } from './src/components/panels/AwakeningQuizPanel.jsx';
 import { DestinyDial } from './src/components/dial/DestinyDial.jsx';
 import { Panel, SectionHead, StatTile, DataRow, Chip, Reveal, CountUp, Field, EmptyState, Readout, SegmentedNav } from './src/components/ui/index.jsx';
 
@@ -52,6 +53,7 @@ const TABS = [
   { id: 'network', label: '关系网络' },
   { id: 'trajectory', label: '人生轨迹' },
   { id: 'daily', label: '每日运势' },
+  { id: 'awaken', label: '觉醒测评' },
 ];
 
 // 使用lunar-javascript进行精确八字排盘
@@ -346,6 +348,17 @@ export default function LifeMap5Visualizer() {
     relationships,
     events,
   }), [ganZhi, relationships, events]);
+
+  // 觉醒测评用的命格：以透出分析得出的真格名为准，回落到应用自身的格局名
+  const awakeningPatternName = transparencyAnalysis?.最终格局?.名称 || patternResult?.patternName || '';
+
+  const awakeningShishen = (() => {
+    const list = transparencyAnalysis?.透出分析 || [];
+    const finalName = transparencyAnalysis?.最终格局?.名称 || '';
+    const hit = list.find(c => c.十神 && finalName.includes(c.十神));
+    return hit?.十神 || '';
+  })();
+
   const trajectory = useMemo(() => calculateTrajectory(birthYear, awakenLevel, events, relationships, influenceAnalyzer), [birthYear, awakenLevel, events, relationships, influenceAnalyzer]);
 
 
@@ -2895,6 +2908,15 @@ export default function LifeMap5Visualizer() {
             </div>
           );
         })()}
+
+        {activeTab === 'awaken' && (
+          <AwakeningQuizPanel
+            patternName={awakeningPatternName}
+            shishen={awakeningShishen}
+            derivedLevel={derivedAwakening ? parseFloat(derivedAwakening.最终层级) : null}
+            derivedLevelName={derivedAwakening?.层级名称 || ''}
+          />
+        )}
 
         {/* 页脚 */}
         <div className="mt-8 text-center text-mist-500 text-sm">
