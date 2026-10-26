@@ -1,5 +1,5 @@
 /**
- * 人生地图 5.0：Ω塌陷 × 人生影响力场 × 觉醒层级
+ * 人生地图 5.1：Ω塌陷 × 人生影响力场 × 觉醒层级
  * 
  * 核心升级：
  * 1. 【人生影响力系统】重要的事件、关系、人如何改变人生轨迹
@@ -26,9 +26,40 @@
  */
 
 import { astro } from 'iztro';
+import { Solar } from 'lunar-javascript';
+
+/**
+ * 精确八字排盘（lunar-javascript）。
+ * @param {string} solarDate - 'YYYY-MM-DD'
+ * @param {number} hour - 时辰索引（0=子时, 1=丑时, …, 11=亥时）
+ * @returns {Object} EightChar 实例（四柱 + 十神）
+ */
+function getPreciseEightChar(solarDate, hour) {
+  const [y, m, d] = String(solarDate).split('-').map(Number);
+  // 时辰取中点代表（丑时用 2 点、寅时用 4 点…），子时跨日取 0 点
+  const shiChenToHour = [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22];
+  const calcHour = shiChenToHour[hour] ?? 12;
+  const eightChar = Solar.fromYmdHms(y, m, d, calcHour, 0, 0).getLunar().getEightChar();
+  if (typeof eightChar.setSect === 'function') {
+    try { eightChar.setSect(2); } catch (e) { /* 忽略 sect 设置失败 */ }
+  }
+  return eightChar;
+}
+
+/**
+ * 按宫名查找紫微命盘宫位。
+ * iztro 的宫位名不带「宫」字（命宫/父母/福德/田宅/官禄/仆役/迁移/疾厄/财帛/子女/夫妻/兄弟），
+ * 只有「命宫」保留后缀。这里做一次归一化，避免传入「官禄宫」这类写法时静默查不到。
+ */
+function findPalace(ziwei, palaceName) {
+  if (!ziwei?.palaces || !palaceName) return undefined;
+  const short = palaceName.replace(/宫$/, '');
+  return ziwei.palaces.find(p => p.name === palaceName)
+    || ziwei.palaces.find(p => p.name === short);
+}
 
 // ════════════════════════════════════════════════════════════════════════════
-// 第一部分：人生影响力系统（v5.0核心创新）
+// 第一部分：人生影响力系统（v5.1核心创新）
 // ════════════════════════════════════════════════════════════════════════════
 
 /**
@@ -319,7 +350,7 @@ const AWAKENING_LEVELS = {
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// 第三部分：重要事件/关系/人标记系统（v5.0新增）
+// 第三部分：重要事件/关系/人标记系统（v5.1新增）
 // ════════════════════════════════════════════════════════════════════════════
 
 /**
@@ -403,17 +434,19 @@ const LIFE_EVENT_SYSTEM = {
     const relType = this.relationshipTypes[relationship.type];
     if (!relType) return 0;
 
-    let mass = relType.maxMass * (relationship.quality || 1);  // quality: 0-1
+    let mass = relType.maxMass * (relationship.quality ?? 0.8);  // quality: 0-1
 
-    // 根据关系开始年龄和衰减计算
-    const yearsKnown = currentAge - (relationship.startAge || 0);
+    // 衰减模型：指定 decayStart 时超过该年龄才衰减；否则自关系开始年龄起衰减；
+    // decayRate 为负表示影响力随年岁增长（子女关系）
+    const yearsKnown = Math.max(0, currentAge - (relationship.startAge ?? 0));
+    const decayRate = relType.decayRate ?? 0;
 
-    if (relType.decayStart && currentAge > relType.decayStart) {
-      const yearsDecay = currentAge - relType.decayStart;
-      mass *= Math.exp(-relType.decayRate * yearsDecay);
-    } else if (relType.decayRate < 0) {
-      // 负衰减 = 影响力增长
-      mass *= Math.exp(-relType.decayRate * yearsKnown);
+    if (decayRate !== 0) {
+      if (relType.decayStart != null && currentAge > relType.decayStart) {
+        mass *= Math.exp(-decayRate * (currentAge - relType.decayStart));
+      } else {
+        mass *= Math.exp(-decayRate * yearsKnown);
+      }
     }
 
     // 关系状态调整
@@ -1350,7 +1383,7 @@ function analyzeLong(ziwei, birthYear, awakenLevel) {
  * 分析穴位（命宫核心 + 重要事件锚点）
  */
 function analyzeXue(ziwei, events = []) {
-  const mingGong = ziwei.palaces.find(p => p.name === '命宫');
+  const mingGong = findPalace(ziwei, '命宫');
   const shenGong = ziwei.palaces.find(p => p.isBodyPalace);
 
   const mingStars = mingGong?.majorStars.filter(s => s.name) || [];
@@ -1441,7 +1474,7 @@ function analyzeSha(ziwei, relationships = [], currentAge) {
     const palaceDetails = [];
 
     config.palaces.forEach(palaceName => {
-      const palace = ziwei.palaces.find(p => p.name === palaceName);
+      const palace = findPalace(ziwei, palaceName);
       if (palace) {
         const stars = palace.majorStars.filter(s => s.name);
         const strength = stars.reduce((s, star) => {
@@ -1681,7 +1714,7 @@ function generateGuidance(long, xue, sha, shui, awakenLevel, trajectory) {
 // ════════════════════════════════════════════════════════════════════════════
 
 /**
- * 生成完整的人生地图5.0
+ * 生成完整的人生地图5.1
  * 
  * @param {string} solarDate - 阳历生日，格式：'YYYY-MM-DD'
  * @param {number} hour - 出生时辰，0-11对应子-亥时
@@ -1699,8 +1732,8 @@ function generateLifeMap5(solarDate, hour, gender, events = [], relationships = 
   const ziwei = astro.bySolar(solarDate, hour, gender);
 
   // 估算觉醒层级
-  const mingGong = ziwei.palaces.find(p => p.name === '命宫');
-  const fudeGong = ziwei.palaces.find(p => p.name === '福德宫');
+  const mingGong = findPalace(ziwei, '命宫');
+  const fudeGong = findPalace(ziwei, '福德宫');
   const mingStars = mingGong?.majorStars.filter(s => s.name) || [];
   const fudeStars = fudeGong?.majorStars.filter(s => s.name) || [];
   const baseAwakenLevel = AWAKENING_LEVELS.estimateBaseLevel(mingStars, fudeStars);
@@ -1737,18 +1770,36 @@ function generateLifeMap5(solarDate, hour, gender, events = [], relationships = 
   // 经典命理分析（三命通会 × 滴天髓）
   // ═══════════════════════════════════════════════════
 
-  // 获取八字信息用于经典分析
-  const monthZhi = DIZHI[Math.floor((parseInt(solarDate.split('-')[1]) + 1) / 2) % 12] || '寅';
-  const dayGan = TIANGAN[(birthYear - 4) % 10] || '甲'; // 简化的日干计算
+  // 获取八字信息用于经典分析（精确排盘，不再用出生年推算的占位值）
+  const eightChar = getPreciseEightChar(solarDate, hour);
+  const monthZhi = eightChar.getMonthZhi();
+  const dayGan = eightChar.getDayGan();
+
+  // 四柱十神：年/月/时干透出者 + 四柱地支藏干本气
+  const tianganShishen = [
+    eightChar.getYearShiShenGan(),
+    eightChar.getMonthShiShenGan(),
+    eightChar.getTimeShiShenGan()
+  ].filter(s => s && s !== '日主');
+
+  const zhiShishen = [
+    ...(eightChar.getYearShiShenZhi() || []),
+    ...(eightChar.getMonthShiShenZhi() || []),
+    ...(eightChar.getDayShiShenZhi() || []),
+    ...(eightChar.getTimeShiShenZhi() || [])
+  ];
+
+  // 取格依据：月支本气十神（三命通会以月令为主）
+  const monthZhiShishen = (eightChar.getMonthShiShenZhi() || [])[0] || '';
 
   // 9. 日主性情分析（滴天髓）
   const dayMasterNature = analyzeDayMasterNature(dayGan, monthZhi);
 
   // 10. 日主强弱分析
-  const dayMasterStrength = analyzeDayMasterStrength(dayGan, monthZhi, []);
+  const dayMasterStrength = analyzeDayMasterStrength(dayGan, monthZhi, [...tianganShishen, ...zhiShishen]);
 
   // 11. 格局判断（三命通会）
-  const baziPattern = determineBaziPattern('正官', []); // 简化示例
+  const baziPattern = determineBaziPattern(monthZhiShishen, tianganShishen);
 
   // 12. 用神选取
   const yongShen = selectYongShen(
