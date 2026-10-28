@@ -9,8 +9,12 @@
  *
  * 参数：
  *   --date          公历出生日期 YYYY-MM-DD（必填）
- *   --hour          时辰索引 0=子时 … 11=亥时（必填）
+ *   --hour          时辰索引 0=子时 … 11=亥时，12=晚子时（必填）
  *   --gender        男 / 女（必填）
+ *   --clock         精确钟表时间 HH:MM（可选，给了则时辰由时刻推导）
+ *   --longitude     出生地经度，东经为正（可选，给了则做真太阳时校正）
+ *   --late-zishi    晚子时换日口径 next-day | current-day | day-cur-time-next
+ *                   （默认 next-day，主流排盘口径）
  *   --events        事件标记 JSON 文件（可选）
  *   --relationships 关系标记 JSON 文件（可选）
  *   --today         今日日期 YYYY-MM-DD（默认今天，本地时区）
@@ -26,7 +30,8 @@ import { dirname, resolve } from 'node:path'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const CORE = resolve(__dirname, '../src/core')
 
-const { getPreciseBaZi, calculateDaYun, analyzeDaYunShishen, analyzeLiuNian } = await import(`${CORE}/bazi-chart.js`)
+const { getPreciseBaZi, calculateDaYun, analyzeDaYunShishen, analyzeLiuNian, resolveHourIndex } = await import(`${CORE}/bazi-chart.js`)
+const { LATE_ZISHI_RULES } = await import(`${CORE}/solar-time.js`)
 const { PatternAnalyzer } = await import(`${CORE}/pattern.js`)
 const { ZiweiAnalyzer } = await import(`${CORE}/ziwei.js`)
 const { HealthAnalyzer } = await import(`${CORE}/health.js`)
@@ -58,17 +63,42 @@ function parseArgs(argv) {
 const args = parseArgs(process.argv)
 
 if (!args.date || args.hour === undefined || !args.gender) {
-  console.error('用法: node scripts/analyze.mjs --date YYYY-MM-DD --hour <0-11> --gender 男|女 [--events f.json] [--relationships f.json]')
+  console.error('用法: node scripts/analyze.mjs --date YYYY-MM-DD --hour <0-12> --gender 男|女 [--clock HH:MM] [--longitude 经度] [--late-zishi next-day|current-day|day-cur-time-next] [--events f.json] [--relationships f.json]')
   process.exit(1)
 }
 
 const [Y, M, D] = String(args.date).split('-').map(Number)
-const hour = Number(args.hour)
 const gender = String(args.gender)
 const today = args.today || (() => {
   const d = new Date()
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 })()
+
+/* ── 排盘时间解算 ──────────────────────────────────────────────────────────
+ * 精确时刻优先：给了 --clock 则时辰由时刻推导（23:00–24:00 → 晚子时 12），
+ * 配合 --longitude 做真太阳时校正，--late-zishi 决定晚子时是否进位到次日。
+ */
+const lateZishiRule = args['late-zishi'] || LATE_ZISHI_RULES.NEXT_DAY
+const preciseOptions = {}
+let hour = Number(args.hour)
+
+if (args.clock) {
+  const [ch, cm] = String(args.clock).split(':').map(Number)
+  if (Number.isFinite(ch)) {
+    preciseOptions.clockHour = ch
+    preciseOptions.clockMinute = Number.isFinite(cm) ? cm : 0
+    const derived = resolveHourIndex(ch, preciseOptions.clockMinute)
+    if (derived >= 0) hour = derived
+  }
+}
+if (args.longitude !== undefined && args.longitude !== '') {
+  const lon = Number(args.longitude)
+  if (Number.isFinite(lon)) preciseOptions.longitude = lon
+}
+preciseOptions.lateZishiRule = lateZishiRule
+
+const hasPrecise = Object.keys(preciseOptions).length > 0
+const chartOptions = hasPrecise ? preciseOptions : {}
 
 const readJson = (p) => {
   if (!p) return []
@@ -82,7 +112,7 @@ const currentAge = currentYear - Y
 
 /* ── 排盘 ────────────────────────────────────────────────────────────────── */
 
-const bazi = getPreciseBaZi(Y, M, D, hour)
+const bazi = getPreciseBaZi(Y, M, D, hour, chartOptions)
 const pillars = [bazi.年柱, bazi.月柱, bazi.日柱, bazi.时柱]
 const dayGan = bazi.日柱.天干
 
@@ -91,7 +121,7 @@ const pattern = pa.analyze()
 const transparency = analyzePatternTransparency({ pillars, dayGan, relationships, events })
 const guide = resolvePatternGuide(transparency.最终格局?.名称 || pattern.patternName)
 
-const ziweiAnalyzer = new ZiweiAnalyzer(Y, M, D, hour, gender)
+const ziweiAnalyzer = new ZiweiAnalyzer(Y, M, D, hour, gender, chartOptions)
 const ziwei = ziweiAnalyzer.analyze()
 
 const health = new HealthAnalyzer(bazi.年柱.天干, bazi.年柱.地支, currentYear)
@@ -118,9 +148,20 @@ const posture = relationships.length
 
 const archive = {
   meta: {
-    来源: '人生地图 5.0 引擎（src/core）',
+    来源: '人生地图 5.2 引擎（src/core）',
     生成日期: today,
-    出生: { 公历: `${Y}-${String(M).padStart(2, '0')}-${String(D).padStart(2, '0')}`, 时辰索引: hour, 性别: gender },
+    出生: {
+      公历: `${Y}-${String(M).padStart(2, '0')}-${String(D).padStart(2, '0')}`,
+      时辰索引: hour,
+      性别: gender,
+      是否晚子时: bazi.是否晚子时,
+      排盘日: bazi.排盘日 ? `${bazi.排盘日.year}-${String(bazi.排盘日.month).padStart(2, '0')}-${String(bazi.排盘日.day).padStart(2, '0')}` : null,
+      晚子时规则: bazi.晚子时规则,
+      钟表时刻: preciseOptions.clockHour !== undefined
+        ? `${String(preciseOptions.clockHour).padStart(2, '0')}:${String(preciseOptions.clockMinute).padStart(2, '0')}`
+        : null,
+      出生地经度: preciseOptions.longitude ?? null,
+    },
     当前年龄: currentAge,
   },
 
@@ -173,6 +214,9 @@ const archive = {
     命宫分析: ziwei.命宫分析,
     当前大限: ziwei.当前大限,
     四化: ziwei.四化,
+    四化体系: ziwei.四化体系,
+    十二神: ziwei.十二神,
+    排盘信息: ziwei.排盘信息,
     整体格局: ziwei.整体格局,
     综合评价: ziwei.综合评价,
   },
