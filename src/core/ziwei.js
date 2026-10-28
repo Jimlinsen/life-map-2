@@ -1,29 +1,105 @@
 import { astro } from 'iztro';
 import { WUXING_TERRAIN_SYSTEM, SHISHEN_FORCE_FIELD } from './constants/language.js';
 import { ZIWEI_PALACE_SYSTEM, ZIWEI_STAR_TRAITS, SIHUA_SYSTEM, STAR_CHARACTER_SYSTEM, ZIWEI_PATTERN_SYSTEM, STAR_COMBINATION_SYSTEM, ZIWEI_INTERPRETATION_MAP } from './constants/ziwei.js';
+import {
+  getSiHuaByStem, buildStarSiHuaMap, transformsToMap, toSiHuaEntries,
+  getYearStemIndex, getYearBranchIndex, getDaXianSiHua, getLiuNianSiHua,
+  getLiuYueSiHua, getLiuRiSiHua, getLiuShiSiHua,
+  buildAllSelfSihua, buildIncomingPalaceMap, buildOverlayTable, SI_HUA_TYPES
+} from './sihua.js';
+import {
+  boshiShenByStem, JIANG_QIAN_SHEN, SUI_QIAN_SHEN, BOSHI_SHEN,
+  buildYunXianShierShenLayers, attachShierShenToPalaces, SHIER_SHEN_MEANING
+} from './shier-shen.js';
+import { LATE_ZISHI_RULES, resolveBirthTime } from './solar-time.js';
 
-export class ZiweiAnalyzer {
-  constructor(birthYear, birthMonth, birthDay, birthHour, gender) {
+/** 地支索引归一化到 0-11 */
+const normalizeBranch = (value) => ((Math.trunc(value) % 12) + 12) % 12;
+
+export class ZiweiAnalyzer {  /**
+   * @param {number} birthYear 出生年
+   * @param {number} birthMonth 出生月
+   * @param {number} birthDay 出生日
+   * @param {number} birthHour 时辰索引 0-11，12 表示晚子时（23:00-24:00）
+   * @param {string} gender '男' | '女'
+   * @param {object} [options]
+   * @param {number} [options.clockHour] 精确钟表小时（0-23）
+   * @param {number} [options.clockMinute] 精确钟表分钟
+   * @param {number} [options.longitude] 出生地经度（东经为正），提供则做真太阳时校正
+   * @param {number} [options.utcOffsetMinutes] 时区标准偏移（分钟），默认 480
+   * @param {string} [options.lateZishiRule] 晚子时换日流派，见 LATE_ZISHI_RULES
+   */
+  constructor(birthYear, birthMonth, birthDay, birthHour, gender, options = {}) {
     this.birthYear = birthYear;
     this.birthMonth = birthMonth;
     this.birthDay = birthDay;
     this.birthHour = birthHour;
     this.gender = gender;
+    this.options = options;
     this.chart = null;
+    this.排盘日 = { year: birthYear, month: birthMonth, day: birthDay };
+    this.是否晚子时 = false;
+    this.时辰索引 = birthHour;
+    this.真太阳时信息 = null;
+    this.晚子时规则 = options.lateZishiRule || LATE_ZISHI_RULES.NEXT_DAY;
     this.initChart();
   }
 
   initChart() {
     try {
-      // 转换时辰索引为iztro需要的时辰索引 (0-11对应子丑寅卯...)
-      const hourIndex = this.birthHour;
+      // ── 时间解算 ─────────────────────────────────────────────────────
+      // 有精确钟表时刻时走真太阳时校正 + 晚子时换日；
+      // 只有时辰索引时，晚子时（12）按流派决定排盘日。
+      const lateZishiRule = this.晚子时规则;
+      const hasExactTime = Number.isFinite(this.options.clockHour);
 
-      // 使用iztro生成紫微命盘
-      this.chart = astro.bySolar(
-        `${this.birthYear}-${this.birthMonth}-${this.birthDay}`,
-        hourIndex,
-        this.gender === '男' ? 'male' : 'female'
-      );
+      let iztroHourIndex = this.birthHour;
+      let solarDateStr = `${this.birthYear}-${String(this.birthMonth).padStart(2, '0')}-${String(this.birthDay).padStart(2, '0')}`;
+
+      if (hasExactTime || this.birthHour === 12) {
+        const solved = resolveBirthTime({
+          year: this.birthYear,
+          month: this.birthMonth,
+          day: this.birthDay,
+          clockHour: hasExactTime ? this.options.clockHour : 23,
+          clockMinute: hasExactTime ? (this.options.clockMinute || 0) : 0,
+          longitude: this.options.longitude,
+          utcOffsetMinutes: this.options.utcOffsetMinutes,
+          lateZishiRule
+        });
+        this.排盘日 = solved.排盘日;
+        this.是否晚子时 = solved.是否晚子时;
+        this.时辰索引 = solved.时辰索引;
+        this.真太阳时信息 = solved.真太阳时;
+
+        if (this.是否晚子时) {
+          // iztro 的 timeIndex=12 即「晚子时」，由 iztro 内部按 dayDivide 规则处理换日
+          iztroHourIndex = 12;
+        } else {
+          iztroHourIndex = solved.时辰索引;
+          solarDateStr = `${solved.排盘日.year}-${String(solved.排盘日.month).padStart(2, '0')}-${String(solved.排盘日.day).padStart(2, '0')}`;
+        }
+      }
+
+      // iztro 的 dayDivide 决定晚子时是否进位到次日：
+      //   forward（默认）= 次日换日（主流排盘口径）
+      //   current          = 当日不换日
+      if (this.是否晚子时) {
+        const dayDivide = lateZishiRule === LATE_ZISHI_RULES.NEXT_DAY ? 'forward' : 'current';
+        this.chart = astro.withOptions({
+          type: 'solar',
+          dateStr: solarDateStr,
+          timeIndex: iztroHourIndex,
+          gender: this.gender === '男' ? 'male' : 'female',
+          config: { dayDivide }
+        });
+      } else {
+        this.chart = astro.bySolar(
+          solarDateStr,
+          iztroHourIndex,
+          this.gender === '男' ? 'male' : 'female'
+        );
+      }
     } catch (error) {
       console.error('紫微命盘生成失败:', error);
       this.chart = null;
@@ -40,6 +116,107 @@ export class ZiweiAnalyzer {
     if (direct) return direct;
     const short = palaceName.replace(/宫$/, '');
     return short !== palaceName ? target.palace(short) : undefined;
+  }
+
+  // ── 辅助方法（供四化体系与十二神使用）──────────────────────────────────
+
+  /** 取当前日期的运限盘（horoscope） */
+  getHoroscope(dateStr) {
+    if (!this.chart) return null;
+    try {
+      if (dateStr) return this.chart.horoscope(dateStr);
+      if (this._horoscope) return this._horoscope;
+      const today = new Date();
+      const ds = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+      this._horoscope = this.chart.horoscope(ds);
+      return this._horoscope;
+    } catch (error) {
+      console.error('获取运限盘失败:', error);
+      return null;
+    }
+  }
+
+  /** 地支字 → 索引（0=子 … 11=亥）；非法返回 -1 */
+  getBranchIndex(zhi) {
+    return ['子', '丑', '寅', '卯', '辰', '巳', '午', '未', '申', '酉', '戌', '亥'].indexOf(zhi);
+  }
+
+  /**
+   * 某宫地支索引处的将前神序（0=将星）。
+   * 将星落于【生年支】的三合帝旺位，其后十一神顺行 ——
+   * 注意起点是生年支，不是该宫自身地支。
+   * @param {number} branchIndex 该宫地支索引
+   * @param {number} yearBranchIndex 生年支索引
+   */
+  getJiangQianIndex(branchIndex, yearBranchIndex) {
+    if (branchIndex < 0) return 0;
+    // 将星落宫 = 三合帝旺位（申子辰→子、寅午戌→午、巳酉丑→酉、亥卯未→卯）
+    const start = [0, 9, 6, 3][normalizeBranch(yearBranchIndex) % 4];
+    return (branchIndex - start + 12) % 12;
+  }
+
+  /**
+   * 某宫地支索引处的岁前神序（0=岁建）。
+   * 岁建落于【生年支】宫，其后十一神顺行。
+   * @param {number} branchIndex 该宫地支索引
+   * @param {number} yearBranchIndex 生年支索引
+   */
+  getSuiQianIndex(branchIndex, yearBranchIndex) {
+    if (branchIndex < 0) return 0;
+    return (branchIndex - normalizeBranch(yearBranchIndex) + 12) % 12;
+  }
+
+  /** 某颗星落在哪个宫（返回宫名，未找到返回空串） */
+  findStarPalace(starName) {
+    if (!starName || !this.chart?.palaces) return '';
+    for (const palace of this.chart.palaces) {
+      const names = [
+        ...(palace.majorStars || []).map(s => s.name),
+        ...(palace.minorStars || []).map(s => s.name),
+        ...(palace.adjectiveStars || []).map(s => s.name)
+      ];
+      if (names.includes(starName)) return palace.name;
+    }
+    return '';
+  }
+
+  /** 按大限索引取大限宫干四化（附带宫位与地支） */
+  getDaXianSiHuaByIndex(dxIndex) {
+    const raw = getDaXianSiHua(this.chart, dxIndex);
+    if (!raw) return null;
+    const palace = this.chart.palaces[dxIndex];
+    return {
+      ...raw,
+      宫位: palace?.name || '',
+      地支: palace?.earthlyBranch || ''
+    };
+  }
+
+  /** 取农历月（1-12），用于流月五虎遁 */
+  getLunarMonth() {
+    try {
+      const lunar = this.chart?.lunarDate;
+      if (typeof lunar === 'string') {
+        const m = lunar.match(/月/);
+        if (m) {
+          const idx = lunar.indexOf('月');
+          const prefix = lunar.slice(0, idx);
+          const cn = ['正', '二', '三', '四', '五', '六', '七', '八', '九', '十', '冬', '腊'];
+          const pos = cn.findIndex(c => prefix.endsWith(c) || prefix.includes(c + '月'));
+          if (pos >= 0) return pos + 1;
+        }
+      }
+    } catch (e) { /* ignore */ }
+    return 1;
+  }
+
+  /** 取日干索引（0-9），无法确定返回 -1 */
+  getDayStemIndex() {
+    const daily = this.chart?.rawDates?.chineseDate?.daily;
+    if (Array.isArray(daily) && daily[0]) {
+      return ['甲', '乙', '丙', '丁', '戊', '己', '庚', '辛', '壬', '癸'].indexOf(daily[0]);
+    }
+    return -1;
   }
 
   analyze() {
@@ -72,11 +249,183 @@ export class ZiweiAnalyzer {
         当前大限: daxian,
         关键星曜: keyStars,
         整体格局: this.analyzePatterns() || { 吉格: [], 凶格: [] },
-        综合评价: this.generateSummary(mingGong, palaces) || '分析完成'
+        综合评价: this.generateSummary(mingGong, palaces) || '分析完成',
+        // ── 新增：多层四化体系与十二神 ──────────────────────────────────
+        四化体系: this.getSihuaSystem() || null,
+        十二神: this.getShierShen() || null,
+        排盘信息: this.getChartMeta() || null
       };
     } catch (e) {
       console.error('ZiweiAnalyzer.analyze crash:', e);
       return { error: e.message, 十二宫: [], 整体格局: { 吉格: [], 凶格: [] } };
+    }
+  }
+
+  /**
+   * 排盘元信息：排盘日、是否晚子时、所用换日流派、真太阳时校正量。
+   */
+  getChartMeta() {
+    const tst = this.真太阳时信息;
+    return {
+      排盘日: `${this.排盘日.year}-${String(this.排盘日.month).padStart(2, '0')}-${String(this.排盘日.day).padStart(2, '0')}`,
+      是否晚子时: this.是否晚子时,
+      晚子时规则: this.晚子时规则,
+      时辰索引: this.时辰索引,
+      真太阳时: tst ? {
+        已校正: tst.corrected,
+        经度修正分钟: Math.round(tst.longitudeCorrectionMinutes),
+        均时差分钟: Math.round(tst.equationOfTimeMinutes),
+        总校正分钟: Math.round(tst.totalCorrectionMinutes),
+        校正后时刻: `${String(tst.hour).padStart(2, '0')}:${String(tst.minute).padStart(2, '0')}`
+      } : null
+    };
+  }
+
+  /**
+   * 多层四化体系。
+   * 本命（生年干）· 大限宫干 · 流年干 · 流月干（五虎遁）· 流日干 · 流时干（五鼠遁）
+   * + 宫干自化 + 来因宫 + 星曜四化叠加表。
+   */
+  getSihuaSystem() {
+    if (!this.chart) return null;
+
+    try {
+      const yearGan = this.getYearGan();
+      const yearStemIndex = getYearStemIndex(this.排盘日.year);
+      const yearBranchIndex = getYearBranchIndex(this.排盘日.year);
+
+      // ── 本命四化（生年干）──────────────────────────────────────────
+      const benming = getSiHuaByStem(yearStemIndex);
+      const benmingMap = buildStarSiHuaMap(yearStemIndex);
+      const 本命条目 = SI_HUA_TYPES.map(type => ({
+        类型: type,
+        星曜: benming[type],
+        落宫: this.findStarPalace(benming[type]),
+        性质: SIHUA_SYSTEM.types[`化${type}`]?.性质 || '',
+        作用: SIHUA_SYSTEM.types[`化${type}`]?.作用 || ''
+      }));
+
+      // ── 大限宫干四化 ───────────────────────────────────────────────
+      const horoscope = this.getHoroscope();
+      const decadal = horoscope?.decadal;
+      const 大限宫干 = decadal ? this.getDaXianSiHuaByIndex(decadal.index) : null;
+      const 大限条目 = 大限宫干
+        ? SI_HUA_TYPES.map(type => ({
+          类型: type,
+          星曜: 大限宫干.transforms[type],
+          落宫: this.findStarPalace(大限宫干.transforms[type]),
+          性质: SIHUA_SYSTEM.types[`化${type}`]?.性质 || '',
+          作用: SIHUA_SYSTEM.types[`化${type}`]?.作用 || ''
+        })).filter(e => e.星曜)
+        : [];
+
+      // ── 流年 / 流月 / 流日 / 流时四化 ───────────────────────────────
+      const 流年 = getLiuNianSiHua(this.排盘日.year);
+      const 流月 = getLiuYueSiHua(yearStemIndex, this.getLunarMonth());
+      const 日干索引 = this.getDayStemIndex();
+      const 流日 = 日干索引 >= 0 ? getLiuRiSiHua(日干索引) : null;
+      const 流时 = 日干索引 >= 0 ? getLiuShiSiHua(日干索引, this.时辰索引) : null;
+
+      const toEntries = (transforms) => SI_HUA_TYPES.map(type => ({
+        类型: type,
+        星曜: transforms?.[type] || '',
+        落宫: this.findStarPalace(transforms?.[type]),
+        性质: SIHUA_SYSTEM.types[`化${type}`]?.性质 || '',
+        作用: SIHUA_SYSTEM.types[`化${type}`]?.作用 || ''
+      })).filter(e => e.星曜);
+
+      // ── 宫干自化 + 来因宫 ──────────────────────────────────────────
+      const 自化 = buildAllSelfSihua(this.chart);
+      const 来因宫 = buildIncomingPalaceMap(this.chart);
+
+      // ── 星曜四化叠加表 ─────────────────────────────────────────────
+      const 叠加表 = buildOverlayTable(this.chart, {
+        本命: benmingMap,
+        大限: 大限宫干 ? transformsToMap(大限宫干.transforms) : undefined,
+        流年: transformsToMap(流年.transforms),
+        流月: transformsToMap(流月.transforms),
+        流日: 流日 ? transformsToMap(流日.transforms) : undefined,
+        流时: 流时 ? transformsToMap(流时.transforms) : undefined
+      });
+
+      return {
+        本命: { 年干: yearGan, 天干索引: yearStemIndex, 条目: 本命条目 },
+        大限: 大限宫干 ? { 宫干: 大限宫干.stemName, 宫位: 大限宫干.宫位, 地支: 大限宫干.地支, 条目: 大限条目 } : null,
+        流年: { 天干: 流年.stemName, 条目: toEntries(流年.transforms) },
+        流月: { 天干: 流月.stemName, 农历月: 流月.month, 条目: toEntries(流月.transforms) },
+        流日: 流日 ? { 天干: 流日.stemName, 条目: toEntries(流日.transforms) } : null,
+        流时: 流时 ? { 天干: 流时.stemName, 条目: toEntries(流时.transforms) } : null,
+        宫干自化: 自化,
+        来因宫,
+        叠加表,
+        年支索引: yearBranchIndex
+      };
+    } catch (error) {
+      console.error('获取四化体系失败:', error);
+      return null;
+    }
+  }
+
+  /**
+   * 十二神体系：本命态（将前 / 岁前 / 博士）+ 运限跟随层。
+   * iztro 原生只给本命态；大限 / 流年 / 流月 / 流日 / 流时各自起一组，
+   * 起点是该运限的地支 —— 这是主流排盘的完整口径。
+   */
+  getShierShen() {
+    if (!this.chart) return null;
+
+    try {
+      const yearGan = this.getYearGan();
+      const yearStemIndex = getYearStemIndex(this.排盘日.year);
+      const yearBranchIndex = getYearBranchIndex(this.排盘日.year);
+
+      // 本命态：iztro 原生已提供，但其岁前第 7 位写「大耗」、博士第 12 位写「官府」，
+      // 主流盘面用「岁破」「官符」，此处统一按主流用字重算。
+      const 博士序 = boshiShenByStem(yearStemIndex, this.gender);
+      const 本命态 = this.chart.palaces.map(palace => {
+        const b = this.getBranchIndex(palace.earthlyBranch);
+        return {
+          宫位: palace.name,
+          地支: palace.earthlyBranch,
+          将前: JIANG_QIAN_SHEN[this.getJiangQianIndex(b, yearBranchIndex)],
+          岁前: SUI_QIAN_SHEN[this.getSuiQianIndex(b, yearBranchIndex)],
+          博士: BOSHI_SHEN[博士序[b]],
+          原生将前: palace.jiangqian12,
+          原生岁前: palace.suiqian12,
+          原生博士: palace.boshi12
+        };
+      });
+
+      // 运限跟随层
+      const horoscope = this.getHoroscope();
+      const layerBranches = {};
+      if (horoscope?.decadal) layerBranches.大限 = this.getBranchIndex(horoscope.decadal.earthlyBranch);
+      if (horoscope?.yearly) layerBranches.流年 = this.getBranchIndex(horoscope.yearly.earthlyBranch);
+      if (horoscope?.monthly) layerBranches.流月 = this.getBranchIndex(horoscope.monthly.earthlyBranch);
+      if (horoscope?.daily) layerBranches.流日 = this.getBranchIndex(horoscope.daily.earthlyBranch);
+      if (horoscope?.hourly) layerBranches.流时 = this.getBranchIndex(horoscope.hourly.earthlyBranch);
+
+      const layers = buildYunXianShierShenLayers(layerBranches);
+      const perPalace = attachShierShenToPalaces(this.chart, layerBranches);
+
+      return {
+        年干: yearGan,
+        年支: this.getYearZhi(),
+        本命态,
+        运限跟随: Object.fromEntries(
+          Object.entries(perPalace).map(([layer, map]) => [
+            layer,
+            {
+              起支地支: ['子', '丑', '寅', '卯', '辰', '巳', '午', '未', '申', '酉', '戌', '亥'][layerBranches[layer]],
+              宫位: map
+            }
+          ])
+        ),
+        含义: SHIER_SHEN_MEANING
+      };
+    } catch (error) {
+      console.error('获取十二神失败:', error);
+      return null;
     }
   }
 
@@ -202,12 +551,39 @@ export class ZiweiAnalyzer {
     return `${starNames}坐${palaceName}，${palaceInfo?.主题}方面${jixingDesc[jixing] || '平稳'}`;
   }
 
+  /**
+   * 取生年天干。
+   * 注意：iztro 的 chart.chineseDate 是**字符串**（如 "庚午 辛巳 庚辰 己卯"），
+   * 不是对象 —— 直接取 chineseDate.heavenlyStem 恒为 undefined。
+   * 可靠来源是 rawDates.chineseDate.yearly（[天干, 地支]）。
+   */
+  getYearGan() {
+    const yearly = this.chart?.rawDates?.chineseDate?.yearly;
+    if (Array.isArray(yearly) && yearly[0]) return yearly[0];
+    // 兜底：从 chineseDate 字符串首段解析
+    const str = typeof this.chart?.chineseDate === 'string' ? this.chart.chineseDate : '';
+    const first = str.split(/[\s-]+/)[0] || '';
+    return first.length === 1 ? first : '';
+  }
+
+  /** 取生年地支 */
+  getYearZhi() {
+    const yearly = this.chart?.rawDates?.chineseDate?.yearly;
+    if (Array.isArray(yearly) && yearly[1]) return yearly[1];
+    const str = typeof this.chart?.chineseDate === 'string' ? this.chart.chineseDate : '';
+    const first = str.split(/[\s-]+/)[0] || '';
+    return first.length === 2 ? first[1] : '';
+  }
+
+  /**
+   * 四化分析：本命 + 大限宫干 + 流年 + 流月 + 流日 + 流时 多层叠合，
+   * 另含宫干自化与来因宫追溯。
+   */
   getSihuaAnalysis() {
     if (!this.chart) return null;
 
     try {
-      // 获取本命四化
-      const yearGan = this.chart.chineseDate?.heavenlyStem || '';
+      const yearGan = this.getYearGan();
       const sihuaConfig = SIHUA_SYSTEM.tianganSihua[yearGan];
 
       if (!sihuaConfig) return { 年干: yearGan, 四化: [] };
@@ -265,8 +641,7 @@ export class ZiweiAnalyzer {
   }
 
   // 获取详细的命宫分析对象
-  getDetailedMingGongAnalysis(starNames) {
-    if (!starNames || starNames.length === 0) {
+  getDetailedMingGongAnalysis(starNames) {    if (!starNames || starNames.length === 0) {
       return {
         核心性格: '你的命宫无主星（命无正曜）。这就像一张白纸，你的性格可塑性极强，很容易受到环境和周围人的影响。你擅长观察和适应，但也可能缺乏坚定的主见。',
         阴影面: '容易随波逐流，或者过度在意他人的看法而迷失自己。',

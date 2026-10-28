@@ -1,5 +1,5 @@
 /**
- * 人生地图 5.1 — Tailwind 主题
+ * 人生地图 5.2 — Tailwind 主题
  *
  * 颜色按语义命名，而不是按色相命名：
  *   五行本色  water / wood / fire / earth / metal —— 图表与标签可直接对应五行

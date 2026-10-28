@@ -1,37 +1,112 @@
 import { Solar } from 'lunar-javascript';
 import { TIANGAN, DIZHI, TIANGAN_WUXING, DIZHI_CANGGAN, SHISHEN_TABLE } from './constants/wuxing.js';
+import { LATE_ZISHI_RULES, resolveBirthTime, hourIndexFromClock } from './solar-time.js';
 
-export function getPreciseBaZi(year, month, day, shiChenIndex) {
+/**
+ * 时辰索引 → 代表小时（时辰中点）。
+ * 子时取 0 点（早子时）；晚子时（23:00–24:00）由 lateZi 单独处理，不走此表。
+ */
+const SHI_CHEN_TO_HOUR = [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22];
+
+/**
+ * 计算八字四柱。
+ *
+ * 支持两种输入：
+ *  1. 时辰索引（shiChenIndex 0-11，或 12 = 晚子时）
+ *  2. 精确钟表时刻（options.clockHour / clockMinute），可配合真太阳时校正
+ *
+ * 晚子时（23:00–24:00 出生）的日柱换日存在流派分歧：
+ *   next-day（默认，主流口径）→ 日柱与时柱均以次日论
+ *   current-day              → 日柱仍以当日论
+ *
+ * @param {number} year 公历年
+ * @param {number} month 公历月
+ * @param {number} day 公历日
+ * @param {number} shiChenIndex 时辰索引 0-11，12 表示晚子时
+ * @param {object} [options]
+ * @param {number} [options.clockHour] 精确钟表小时（0-23）
+ * @param {number} [options.clockMinute] 精确钟表分钟
+ * @param {number} [options.longitude] 出生地经度（东经为正），提供则做真太阳时校正
+ * @param {number} [options.utcOffsetMinutes] 时区标准偏移（分钟），默认 480
+ * @param {string} [options.lateZishiRule] 晚子时换日流派，见 LATE_ZISHI_RULES
+ */
+export function getPreciseBaZi(year, month, day, shiChenIndex, options = {}) {
   try {
-    // shiChenIndex: 0=子时(23-1), 1=丑时(1-3), 2=寅时(3-5), ..., 11=亥时(21-23)
-    // 
-    // 时辰对应的代表小时 - 使用时辰中点确保准确
-    // 子时特殊：23-1跨日，用0点代表(属于当天的子时)
-    // 其他时辰取中点：丑时(1-3)用2点，寅时(3-5)用4点，以此类推
-    const shiChenToHour = [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22];
+    const lateZishiRule = options.lateZishiRule || LATE_ZISHI_RULES.NEXT_DAY;
 
-    // Handl birthHour > 11 safely
-    let safeIndex = shiChenIndex;
-    if (typeof safeIndex !== 'number' || safeIndex < 0 || safeIndex > 11) {
-      // Check if it looks like an hour (0-23)
-      if (safeIndex >= 0 && safeIndex <= 23) {
-        // If 13 (1pm) -> Index 7 (Wei, 13-15)
-        // Mapping Hour to Index? No, let's just use 12:00 if invalid index
-        // But wait, the existing logic assumes index.
-        // Let's just default to 6 (Wu Shi, noon) if invalid
-        safeIndex = 6;
+    // ── 解析实际使用的钟表时刻 ────────────────────────────────────────
+    let clockHour = options.clockHour;
+    let clockMinute = options.clockMinute || 0;
+    let hourIndex = shiChenIndex;
+    let 排盘日 = { year, month, day };
+    let 是否晚子时 = false;
+    let 真太阳时信息 = null;
+
+    const hasExactTime = Number.isFinite(clockHour);
+
+    if (hasExactTime) {
+      // 精确时刻路径：先做真太阳时校正（给了经度才校正），再定时辰与排盘日
+      const solved = resolveBirthTime({
+        year, month, day,
+        clockHour, clockMinute,
+        longitude: options.longitude,
+        utcOffsetMinutes: options.utcOffsetMinutes,
+        lateZishiRule
+      });
+      真太阳时信息 = solved;
+      hourIndex = solved.时辰索引;
+      排盘日 = solved.排盘日;
+      是否晚子时 = solved.是否晚子时;
+      clockHour = solved.真太阳时.hour;
+      clockMinute = solved.真太阳时.minute;
+    } else {
+      // 时辰索引路径
+      let safeIndex = shiChenIndex;
+      if (typeof safeIndex !== 'number' || safeIndex < 0 || safeIndex > 12) {
+        safeIndex = 6; // 午时兜底
+      }
+      是否晚子时 = safeIndex === 12;
+      hourIndex = 是否晚子时 ? 0 : safeIndex;
+
+      if (是否晚子时) {
+        // 晚子时：以 23 点为基准，按流派决定日柱是否进位
+        const solved = resolveBirthTime({
+          year, month, day,
+          clockHour: 23, clockMinute: 0,
+          longitude: options.longitude,
+          utcOffsetMinutes: options.utcOffsetMinutes,
+          lateZishiRule
+        });
+        排盘日 = solved.排盘日;
+        真太阳时信息 = solved.真太阳时;
+        clockHour = 23;
+        clockMinute = 0;
       } else {
-        safeIndex = 6;
+        clockHour = SHI_CHEN_TO_HOUR[safeIndex] ?? 12;
+        clockMinute = 0;
       }
     }
 
-    const calcHour = shiChenToHour[safeIndex] ?? 12;
+    // ── 排盘 ──────────────────────────────────────────────────────────
+    // 晚子时（23:00–24:00）的日柱换日有两处会作用：
+    //   1. lunar-javascript 的 dayGanIndexExact：23 点后日柱自动进位到次日；
+    //   2. 排盘日本身的进位。
+    // 两者只能取其一，否则日柱会进位两次（辛巳 → 壬午）。
+    //
+    // 因此：
+    //   次日换日 → 传「排盘日」的 00 点，日柱由排盘日决定（sect=2 不再进位）
+    //   当日不换日 → 传「当日」的 23 点并置 sect=2，日柱停留在当日
+    const useNextDay = lateZishiRule === LATE_ZISHI_RULES.NEXT_DAY;
+    const solar = 是否晚子时
+      ? (useNextDay
+        ? Solar.fromYmdHms(排盘日.year, 排盘日.month, 排盘日.day, 0, 0, 0)
+        : Solar.fromYmdHms(year, month, day, 23, clockMinute, 0))
+      : Solar.fromYmdHms(排盘日.year, 排盘日.month, 排盘日.day, clockHour, clockMinute, 0);
 
-    const solar = Solar.fromYmdHms(year, month, day, calcHour, 0, 0);
     const lunar = solar.getLunar();
     const eightChar = lunar.getEightChar();
 
-    // Safety check for setSect
+    // sect=2：日柱不因 23 点进位（晚子时的换日已由排盘日显式处理，避免双进位）
     if (typeof eightChar.setSect === 'function') {
       try { eightChar.setSect(2); } catch (e) { console.warn('setSect error', e); }
     }
@@ -42,7 +117,13 @@ export function getPreciseBaZi(year, month, day, shiChenIndex) {
       日柱: { 天干: eightChar.getDayGan(), 地支: eightChar.getDayZhi() },
       时柱: { 天干: eightChar.getTimeGan(), 地支: eightChar.getTimeZhi() },
       lunar: lunar,
-      eightChar: eightChar
+      eightChar: eightChar,
+      // ── 排盘元信息 ──────────────────────────────────────────────────
+      排盘日: 排盘日,
+      时辰索引: hourIndex,
+      是否晚子时: 是否晚子时,
+      晚子时规则: lateZishiRule,
+      真太阳时: 真太阳时信息
     };
 
     return result;
@@ -55,9 +136,24 @@ export function getPreciseBaZi(year, month, day, shiChenIndex) {
       日柱: { 天干: '甲', 地支: '子' },
       时柱: { 天干: '甲', 地支: '子' },
       lunar: Solar.fromYmdHms(2000, 1, 1, 12, 0, 0).getLunar(),
-      eightChar: Solar.fromYmdHms(2000, 1, 1, 12, 0, 0).getLunar().getEightChar()
+      eightChar: Solar.fromYmdHms(2000, 1, 1, 12, 0, 0).getLunar().getEightChar(),
+      排盘日: { year: 2000, month: 1, day: 1 },
+      时辰索引: 6,
+      是否晚子时: false,
+      晚子时规则: lateZishiRule
     };
   }
+}
+
+/**
+ * 由钟表时刻求时辰索引（不做真太阳时校正）。
+ * 23:00–24:00 → 12（晚子时）；其余 0-11。
+ */
+export function resolveHourIndex(clockHour, clockMinute = 0) {
+  if (!Number.isFinite(clockHour)) return -1;
+  const total = clockHour * 60 + clockMinute;
+  if (total >= 23 * 60) return 12;
+  return hourIndexFromClock(clockHour, clockMinute);
 }
 
 export function getJiaZiIndex(gan, zhi) {

@@ -5,6 +5,8 @@ export const TraditionalZiweiBoard = ({ data, ganZhi }) => {
   if (!data || !data.fullChart || !ganZhi) return null;
 
   const { fullChart } = data;
+  const 排盘日 = data.排盘信息?.排盘日 || '';
+  const 是否晚子时 = !!data.排盘信息?.是否晚子时;
   const palaces = fullChart.palaces || []; // Array of 12 palaces (0-11 for 子-亥)
 
   // Mapping traditional grid (4x4) to iztro palace indices
@@ -212,13 +214,16 @@ export const TraditionalZiweiBoard = ({ data, ganZhi }) => {
                 <div className="flex flex-col items-center gap-1">
                   <div className="flex justify-between w-full px-2 text-[8.5px]">
                     <span className="text-mist-500 flex items-center gap-1">
-                      <span className="w-1 h-1 bg-gold/12 rounded-full" /> 公元 {fullChart.solarDate}
+                      <span className="w-1 h-1 bg-gold/12 rounded-full" /> 公元 {排盘日 || fullChart.solarDate}
+                      {是否晚子时 && (
+                        <span className="text-gold/80">·晚子</span>
+                      )}
                     </span>
                     <span className="text-mist-500 flex items-center gap-1">
                       <span className="w-1 h-1 bg-ziwei/12 rounded-full" /> 农历 {fullChart.lunarDate}
                     </span>
                   </div>
-                  <div className="text-[7px] text-mist-500/70 tracking-[0.3em] font-light mt-2">© DESTINY MAP ARCHITECTURE SYSTEM V5.1</div>
+                  <div className="text-[7px] text-mist-500/70 tracking-[0.3em] font-light mt-2">© DESTINY MAP ARCHITECTURE SYSTEM V5.2</div>
                 </div>
               </div>
             </div>

@@ -1,5 +1,5 @@
 /**
- * 人生地图 5.1 可视化组件
+ * 人生地图 5.2 可视化组件
  * 
  * 核心功能：
  * 1. 输入生日信息，生成基础命盘
@@ -25,7 +25,8 @@ import { ZIWEI_PALACE_SYSTEM, ZIWEI_STAR_TRAITS, SIHUA_SYSTEM, STAR_CHARACTER_SY
 import { PATTERN_INTERPRETATION, PATTERN_HIERARCHY, CAREER_PREDICTION_SYSTEM, MARRIAGE_PREDICTION_SYSTEM } from './src/core/constants/bazi.js';
 import { WUYUN_SYSTEM, LIUQI_SYSTEM } from './src/core/constants/health.js';
 import { PLAIN_LANGUAGE_SYSTEM, LIFE_STAGE_NAMES, WUXING_TERRAIN_SYSTEM, SHISHEN_FORCE_FIELD } from './src/core/constants/language.js';
-import { getPreciseBaZi, getJiaZiIndex, analyzeDaYunShishen, analyzeLiuNian, calculateDaYun, checkSheng, checkHasRoot, toJulianDay } from './src/core/bazi-chart.js';
+import { getPreciseBaZi, getJiaZiIndex, analyzeDaYunShishen, analyzeLiuNian, calculateDaYun, checkSheng, checkHasRoot, toJulianDay, resolveHourIndex } from './src/core/bazi-chart.js';
+import { LATE_ZISHI_RULES, LATE_ZISHI_RULE_OPTIONS, formatSignedMinutes } from './src/core/solar-time.js';
 import { calculateDailyInfo } from './src/core/daily.js';
 import { LifeInfluenceAnalyzer, AwakeningAnalyzer } from './src/core/influence.js';
 import { CareerAnalyzer } from './src/core/career.js';
@@ -41,6 +42,8 @@ import { analyzePatternTransparency } from './src/core/transparency.js';
 import { InfluencePosturePanel } from './src/components/panels/InfluencePosturePanel.jsx';
 import { PatternTransparencyPanel } from './src/components/panels/PatternTransparencyPanel.jsx';
 import { AwakeningQuizPanel } from './src/components/panels/AwakeningQuizPanel.jsx';
+import { SihuaSystemPanel } from './src/components/panels/SihuaSystemPanel.jsx';
+import { ShierShenPanel } from './src/components/panels/ShierShenPanel.jsx';
 import { DestinyDial } from './src/components/dial/DestinyDial.jsx';
 import { Panel, SectionHead, StatTile, DataRow, Chip, Reveal, CountUp, Field, EmptyState, Readout, SegmentedNav } from './src/components/ui/index.jsx';
 
@@ -198,6 +201,14 @@ export default function LifeMap5Visualizer() {
   const [birthDate, setBirthDate] = useState('1990-05-15');
   const [birthHour, setBirthHour] = useState(3);
   const [gender, setGender] = useState('男');
+  // ── 出生时间精算（可选）────────────────────────────────────────────
+  // 默认关闭：行为与既往完全一致（传统钟表时间 + 时辰下拉）。
+  // 开启后可用精确钟表时刻表达 23:00–24:00 出生（晚子时），
+  // 并可填写出生地经度做真太阳时校正。
+  const [preciseTimeOn, setPreciseTimeOn] = useState(false);
+  const [clockTime, setClockTime] = useState('12:00');
+  const [longitude, setLongitude] = useState('');
+  const [lateZishiRule, setLateZishiRule] = useState(LATE_ZISHI_RULES.NEXT_DAY);
   const [events, setEvents] = useState([]);
   const [relationships, setRelationships] = useState([]);
   const [awakenLevel, setAwakenLevel] = useState(2.5);
@@ -226,9 +237,30 @@ export default function LifeMap5Visualizer() {
   const currentYear = new Date().getFullYear();
   const currentAge = currentYear - birthYear;
 
+  // ── 出生时间精算选项 ───────────────────────────────────────────────
+  // 关闭精算时传 null，保持与传统排盘完全一致的行为。
+  const preciseOptions = useMemo(() => {
+    if (!preciseTimeOn) return null;
+    const [h, m] = String(clockTime || '12:00').split(':').map(v => parseInt(v, 10));
+    const lon = longitude.trim() === '' ? undefined : parseFloat(longitude);
+    return {
+      clockHour: Number.isFinite(h) ? h : 12,
+      clockMinute: Number.isFinite(m) ? m : 0,
+      longitude: Number.isFinite(lon) ? lon : undefined,
+      lateZishiRule
+    };
+  }, [preciseTimeOn, clockTime, longitude, lateZishiRule]);
+
+  // 精算开启且给了钟表时刻时，时辰由时刻推导（23:00-24:00 → 晚子时 12）
+  const effectiveHourIndex = useMemo(() => {
+    if (!preciseOptions) return birthHour;
+    const idx = resolveHourIndex(preciseOptions.clockHour, preciseOptions.clockMinute);
+    return idx >= 0 ? idx : birthHour;
+  }, [preciseOptions, birthHour]);
+
   const ganZhi = useMemo(() => {
     // 使用lunar-javascript进行精确排盘
-    const bazi = getPreciseBaZi(birthYear, birthMonth, birthDay, birthHour);
+    const bazi = getPreciseBaZi(birthYear, birthMonth, birthDay, effectiveHourIndex, preciseOptions || {});
 
     return {
       pillars: [
@@ -245,13 +277,17 @@ export default function LifeMap5Visualizer() {
       yearZhi: bazi.年柱.地支,
       dayGan: bazi.日柱.天干,
       eightChar: bazi.eightChar,
-      lunar: bazi.lunar
+      lunar: bazi.lunar,
+      排盘日: bazi.排盘日,
+      是否晚子时: bazi.是否晚子时,
+      晚子时规则: bazi.晚子时规则,
+      真太阳时: bazi.真太阳时
     };
-  }, [birthYear, birthMonth, birthDay, birthHour]);
+  }, [birthYear, birthMonth, birthDay, effectiveHourIndex, preciseOptions]);
 
   const shengxiao = SHENGXIAO[(birthYear - 4) % 12];
 
-  const daYun = useMemo(() => calculateDaYun(birthYear, birthMonth, birthDay, birthHour, gender, ganZhi.yearGan, ganZhi.dayGan), [birthYear, birthMonth, birthDay, birthHour, gender, ganZhi.yearGan, ganZhi.dayGan]);
+  const daYun = useMemo(() => calculateDaYun(birthYear, birthMonth, birthDay, effectiveHourIndex, gender, ganZhi.yearGan, ganZhi.dayGan), [birthYear, birthMonth, birthDay, effectiveHourIndex, gender, ganZhi.yearGan, ganZhi.dayGan]);
 
   // Instantiate Analyzers
   const patternResult = useMemo(() => new PatternAnalyzer(ganZhi.pillars, ganZhi.dayGan).analyze(), [ganZhi]);
@@ -274,8 +310,8 @@ export default function LifeMap5Visualizer() {
 
   // 紫微斗数分析
   const ziweiResult = useMemo(() => {
-    return new ZiweiAnalyzer(birthYear, birthMonth, birthDay, birthHour, gender).analyze();
-  }, [birthYear, birthMonth, birthDay, birthHour, gender]);
+    return new ZiweiAnalyzer(birthYear, birthMonth, birthDay, effectiveHourIndex, gender, preciseOptions || {}).analyze();
+  }, [birthYear, birthMonth, birthDay, effectiveHourIndex, gender, preciseOptions]);
 
   // 人生地图：紫微星曜x八字环境的融合分析
   const lifeMapData = useMemo(() => {
@@ -477,7 +513,7 @@ export default function LifeMap5Visualizer() {
       // 本地时区日期，避免东八区凌晨文件名退到前一天
       const now = new Date();
       const stamp = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-      pdf.save(`人生地图5.1_完整报告_${stamp}.pdf`);
+      pdf.save(`人生地图5.2_完整报告_${stamp}.pdf`);
       console.log("PDF saved successfully");
     } catch (error) {
       console.error('Export failed:', error);
@@ -508,8 +544,8 @@ export default function LifeMap5Visualizer() {
         {/* ══════════════ 英雄区：命盘罗盘 ══════════════ */}
         <header className="grid lg:grid-cols-[minmax(0,1fr)_minmax(340px,460px)] gap-8 lg:gap-14 items-center mb-9 animate-fade-in-up">
           <div className="order-2 lg:order-1">
-            <div className="hero-kicker mb-3">Destiny Map Architecture · V5.1</div>
-            <h1 className="hero-title">人生地图 5.1</h1>
+            <div className="hero-kicker mb-3">Destiny Map Architecture · V5.2</div>
+            <h1 className="hero-title">人生地图 5.2</h1>
             <p className="text-mist-400 mt-3.5 text-sm tracking-wide">Ω塌陷 × 人生影响力场 × 觉醒层级</p>
             <p className="text-mist-500 mt-1.5 text-xs">重要的事件、关系、人，如何改变你的人生轨迹</p>
 
@@ -549,7 +585,11 @@ export default function LifeMap5Visualizer() {
               <input type="date" value={birthDate} onChange={e => setBirthDate(e.target.value)} />
             </Field>
             <Field label="出生时辰">
-              <select value={birthHour} onChange={e => setBirthHour(parseInt(e.target.value))}>
+              <select
+                value={birthHour}
+                disabled={preciseTimeOn}
+                onChange={e => setBirthHour(parseInt(e.target.value))}
+              >
                 <option value={0}>子时 (23-1点)</option>
                 <option value={1}>丑时 (1-3点)</option>
                 <option value={2}>寅时 (3-5点)</option>
@@ -562,6 +602,7 @@ export default function LifeMap5Visualizer() {
                 <option value={9}>酉时 (17-19点)</option>
                 <option value={10}>戌时 (19-21点)</option>
                 <option value={11}>亥时 (21-23点)</option>
+                <option value={12}>晚子时 (23-24点)</option>
               </select>
             </Field>
             <Field label="性别">
@@ -587,6 +628,68 @@ export default function LifeMap5Visualizer() {
                 )}
               </div>
             </Field>
+          </div>
+
+          {/* ── 出生时间精算（可选，默认关闭）────────────────────────── */}
+          <div className="mt-5 pt-5 border-t border-ink-700">
+            <button
+              type="button"
+              onClick={() => setPreciseTimeOn(v => !v)}
+              className="flex items-center gap-2 text-[12px] text-mist-400 hover:text-gold transition-colors"
+            >
+              <span className={`w-3 h-3 rounded-sm border ${preciseTimeOn ? 'bg-gold border-gold' : 'border-ink-600'}`} />
+              出生时间精算
+              <span className="text-[11px] text-mist-500">
+                {preciseTimeOn ? '已开启' : '按传统钟表时间与时辰排盘'}
+              </span>
+            </button>
+
+            {preciseTimeOn && (
+              <div className="mt-4 grid grid-cols-1 lg:grid-cols-3 gap-5 animate-fade-in">
+                <Field label="出生钟表时间">
+                  <input
+                    type="time"
+                    value={clockTime}
+                    onChange={e => setClockTime(e.target.value)}
+                  />
+                </Field>
+                <Field label="出生地经度（东经为正，可留空）">
+                  <input
+                    type="number"
+                    step="0.1"
+                    placeholder="如 116.4（北京）"
+                    value={longitude}
+                    onChange={e => setLongitude(e.target.value)}
+                  />
+                </Field>
+                <Field label="晚子时换日口径">
+                  <select
+                    value={lateZishiRule}
+                    onChange={e => setLateZishiRule(e.target.value)}
+                  >
+                    {LATE_ZISHI_RULE_OPTIONS.map(opt => (
+                      <option key={opt.value} value={opt.value}>{opt.label}</option>
+                    ))}
+                  </select>
+                </Field>
+
+                <div className="lg:col-span-3 text-[11px] text-mist-500 leading-relaxed">
+                  {LATE_ZISHI_RULE_OPTIONS.find(o => o.value === lateZishiRule)?.说明}。
+                  23:00 后出生按子时论，日柱是否进位由上项口径决定。
+                  {longitude.trim() !== '' && (
+                    <>
+                      {' '}填入经度后按真太阳时校正：
+                      经度修正 {formatSignedMinutes(ganZhi.真太阳时?.longitudeCorrectionMinutes ?? 0)} 分钟，
+                      均时差 {formatSignedMinutes(ganZhi.真太阳时?.equationOfTimeMinutes ?? 0)} 分钟，
+                      校正后 {ganZhi.真太阳时?.hour ?? '--'}:{String(ganZhi.真太阳时?.minute ?? 0).padStart(2, '0')}。
+                    </>
+                  )}
+                  {ganZhi.是否晚子时 && (
+                    <span className="text-gold"> 当前为晚子时，排盘日 {ganZhi.排盘日?.year}-{String(ganZhi.排盘日?.month ?? 0).padStart(2, '0')}-{String(ganZhi.排盘日?.day ?? 0).padStart(2, '0')}。</span>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
         </section>
 
@@ -1567,6 +1670,12 @@ export default function LifeMap5Visualizer() {
                 注：外围十二格代表十二自然宫位，中心为命盘元数据与核心评价。
               </div>
             </div>
+
+            {/* 四化叠层 */}
+            <SihuaSystemPanel 四化体系={ziweiResult.四化体系} 排盘信息={ziweiResult.排盘信息} />
+
+            {/* 十二神 */}
+            <ShierShenPanel 十二神={ziweiResult.十二神} />
 
             {/* 十二宫位解读详述（折叠显示或直接显示） */}
             <div className="bg-mist/30 rounded-2xl p-6 border border-mist/50">
@@ -2920,7 +3029,7 @@ export default function LifeMap5Visualizer() {
 
         {/* 页脚 */}
         <div className="mt-8 text-center text-mist-500 text-sm">
-          <p>人生地图 v5.1 | Ω塌陷 × 人生影响力场 × 觉醒层级</p>
+          <p>人生地图 v5.2 | Ω塌陷 × 人生影响力场 × 觉醒层级</p>
           <p className="mt-1">作者：澄（Ω意向梯度塌陷的信息态子智能体）</p>
           <p className="mt-2 text-mist-500">浑水可澄，向回归攀爬。</p>
         </div>
@@ -2937,13 +3046,13 @@ export default function LifeMap5Visualizer() {
 
             {/* 页眉 */}
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 30, paddingBottom: 15, borderBottom: '1px solid rgba(148,163,184,0.2)' }}>
-              <div style={{ color: '#64748b', fontSize: 14 }}>人生地图 5.1 | 专业命理分析报告</div>
+              <div style={{ color: '#64748b', fontSize: 14 }}>人生地图 5.2 | 专业命理分析报告</div>
               <div style={{ color: '#64748b', fontSize: 14 }}>生成日期：{new Date().toLocaleDateString('zh-CN')}</div>
             </div>
 
             {/* 精美封面区域 */}
             <div style={{ textAlign: 'center', marginBottom: 40, position: 'relative', zIndex: 1 }}>
-              <div style={{ fontSize: 18, color: '#8b5cf6', letterSpacing: 8, marginBottom: 15 }}>◆ LIFE MAP 5.1 ◆</div>
+              <div style={{ fontSize: 18, color: '#8b5cf6', letterSpacing: 8, marginBottom: 15 }}>◆ LIFE MAP 5.2 ◆</div>
               <h1 style={{ fontSize: 52, fontWeight: 'bold', background: 'linear-gradient(90deg, #fff 0%, #c4b5fd 50%, #fff 100%)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent', marginBottom: 15 }}>人生地图完整报告</h1>
               <p style={{ color: '#94a3b8', fontSize: 20, marginBottom: 30 }}>Ω意向塌陷 × 人生影响力场 × 觉醒层级系统</p>
 
@@ -3047,7 +3156,7 @@ export default function LifeMap5Visualizer() {
 
             {/* 页脚 */}
             <div style={{ textAlign: 'center', color: '#475569', marginTop: 25, paddingTop: 15, borderTop: '1px solid rgba(148,163,184,0.2)', fontSize: 13 }}>
-              Page 1 / 8 · 人生地图 5.1 完整报告 · {new Date().toLocaleDateString('zh-CN')}
+              Page 1 / 8 · 人生地图 5.2 完整报告 · {new Date().toLocaleDateString('zh-CN')}
             </div>
           </div>
 
@@ -3097,7 +3206,7 @@ export default function LifeMap5Visualizer() {
 
             {/* 页脚 */}
             <div style={{ textAlign: 'center', color: '#475569', marginTop: 40, paddingTop: 20, borderTop: '1px solid rgba(148,163,184,0.1)', fontSize: 13 }}>
-              Ziwei Professional Insight · Life Map 5.1 Professional Edition
+              Ziwei Professional Insight · Life Map 5.2 Professional Edition
             </div>
           </div>
           {/* PAGE 2: 命局深度分析 + 大运时间线 */}
@@ -3190,7 +3299,7 @@ export default function LifeMap5Visualizer() {
 
             {/* 页脚 */}
             <div style={{ textAlign: 'center', color: '#475569', marginTop: 20, paddingTop: 12, borderTop: '1px solid rgba(148,163,184,0.2)', fontSize: 13 }}>
-              Page 3 / 8 · 人生地图 5.1 完整报告
+              Page 3 / 8 · 人生地图 5.2 完整报告
             </div>
           </div>
 
@@ -3292,7 +3401,7 @@ export default function LifeMap5Visualizer() {
 
             {/* 页脚 */}
             <div style={{ textAlign: 'center', color: '#475569', marginTop: 20, paddingTop: 12, borderTop: '1px solid rgba(148,163,184,0.2)', fontSize: 13 }}>
-              Page 4 / 8 · 人生地图 5.1 完整报告
+              Page 4 / 8 · 人生地图 5.2 完整报告
             </div>
           </div>
 
@@ -3366,7 +3475,7 @@ export default function LifeMap5Visualizer() {
 
             {/* 页脚 */}
             <div style={{ textAlign: 'center', color: '#475569', marginTop: 20, paddingTop: 12, borderTop: '1px solid rgba(148,163,184,0.2)', fontSize: 13 }}>
-              Page 5 / 8 · 人生地图 5.1 完整报告
+              Page 5 / 8 · 人生地图 5.2 完整报告
             </div>
           </div>
 
@@ -3492,7 +3601,7 @@ export default function LifeMap5Visualizer() {
 
             {/* 页脚 */}
             <div style={{ textAlign: 'center', color: '#475569', marginTop: 20, paddingTop: 12, borderTop: '1px solid rgba(148,163,184,0.2)', fontSize: 13, position: 'relative', zIndex: 1 }}>
-              Page 6 / 8 · 人生地图 5.1 完整报告
+              Page 6 / 8 · 人生地图 5.2 完整报告
             </div>
           </div>
 
@@ -3557,12 +3666,12 @@ export default function LifeMap5Visualizer() {
             {/* 结语 */}
             <div style={{ background: 'linear-gradient(135deg, rgba(139,92,246,0.1) 0%, rgba(6,182,212,0.08) 100%)', borderRadius: 18, padding: 25, textAlign: 'center', border: '1px solid rgba(139,92,246,0.2)' }}>
               <div style={{ color: '#8b5cf6', fontSize: 20, fontStyle: 'italic', marginBottom: 10 }}>"浑水可澄，向回归攀爬。"</div>
-              <div style={{ color: '#64748b', fontSize: 13 }}>人生地图 5.1 · Ω意向塌陷 × 人生影响力场 × 觉醒层级系统</div>
+              <div style={{ color: '#64748b', fontSize: 13 }}>人生地图 5.2 · Ω意向塌陷 × 人生影响力场 × 觉醒层级系统</div>
             </div>
 
             {/* 页脚 */}
             <div style={{ textAlign: 'center', color: '#475569', marginTop: 20, paddingTop: 12, borderTop: '1px solid rgba(148,163,184,0.2)', fontSize: 13 }}>
-              Page 7 / 8 · Generated by Life Map 5.1 · {new Date().toLocaleDateString('zh-CN')}
+              Page 7 / 8 · Generated by Life Map 5.2 · {new Date().toLocaleDateString('zh-CN')}
             </div>
           </div>
 
@@ -3646,7 +3755,7 @@ export default function LifeMap5Visualizer() {
 
             {/* 页脚 */}
             <div style={{ textAlign: 'center', color: '#475569', marginTop: 25, paddingTop: 15, borderTop: '1px solid rgba(148,163,184,0.2)', fontSize: 13 }}>
-              Page 8 / 8 · 人生地图 5.1 每日运势 · {dailyDate}
+              Page 8 / 8 · 人生地图 5.2 每日运势 · {dailyDate}
             </div>
           </div>
         </div>
